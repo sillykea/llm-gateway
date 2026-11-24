@@ -1,0 +1,25 @@
+{
+  "listen": ":8080",
+  "api_keys": [
+    { "name": "default", "key_env": "GATEWAY_API_KEY", "rpm": 120, "monthly_budget_usd": 50 }
+  ],
+  "providers": [
+    { "name": "ollama", "type": "ollama", "base_url": "http://ollama:11434", "local": true, "timeout_seconds": 120 },
+    { "name": "openai", "type": "openai", "base_url": "https://api.openai.com", "api_key_env": "OPENAI_API_KEY", "timeout_seconds": 60 }
+  ],
+  "models": {
+    "chat-default": [
+      { "provider": "openai", "model": "gpt-4o-mini" },
+      { "provider": "ollama", "model": "llama3.1:8b" }
+    ],
+    "chat-private": [
+      { "provider": "ollama", "model": "llama3.1:8b" }
+    ]
+  },
+  "pii": { "mode": "route_local" },
+  "cache": { "backend": "redis", "redis_addr": "redis:6379", "ttl_seconds": 3600 },
+  "limits": { "max_in_flight": 256, "breaker_threshold": 5, "breaker_cooldown_seconds": 30 },
+  "pricing": {
+    "gpt-4o-mini": { "input_per_1k": 0.00015, "output_per_1k": 0.0006 }
+  }
+}
