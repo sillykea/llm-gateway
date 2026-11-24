@@ -63,7 +63,7 @@ internal/breaker    circuit breaker per provider
 internal/budget     monthly spend per key
 internal/ratelimit  token bucket per key
 internal/pii        windowed personal data detection and redaction
-internal/cache      LRU and pooled Redis (RESP) backends
+internal/cache      LRU and pooled Redis (RESP, optional TLS + AUTH) backends
 internal/metrics    Prometheus text exposition
 internal/config     loading, defaults, validation
 ```
