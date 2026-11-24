@@ -12,8 +12,8 @@ and an HTTP router.
 ## Decision
 
 Use the standard library only. Go 1.22's `ServeMux` handles method and path
-routing. The Redis client implements the three RESP commands needed (GET,
-SET EX, PING), and metrics are written in the Prometheus text format by hand.
+routing. The Redis client implements the few RESP commands needed (GET,
+SET EX, PING, AUTH) over plain TCP or TLS, and metrics are written in the Prometheus text format by hand.
 
 ## Consequences
 
@@ -21,6 +21,7 @@ SET EX, PING), and metrics are written in the Prometheus text format by hand.
   `govulncheck` only has the toolchain to check.
 - Around 250 lines of code are ours to maintain. They are covered by tests,
   including a fake Redis server.
-- Advanced Redis features (cluster, sentinel, TLS) aren't available. If they
-  were needed, switching to `go-redis` would only touch `internal/cache`,
-  because the rest of the code depends on the `Cache` interface.
+- TLS and password auth come from `crypto/tls` and one extra command. Cluster
+  mode and Sentinel aren't supported. If they were needed, switching to
+  `go-redis` would only touch `internal/cache`, because the rest of the code
+  depends on the `Cache` interface.
