@@ -3,6 +3,7 @@ package cache
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -13,15 +14,28 @@ import (
 )
 
 // Redis is a small Redis client that speaks just enough of the RESP protocol
-// for GET, SET with expiry and PING. It keeps a pool of connections so
-// concurrent requests don't queue behind each other.
+// for GET, SET with expiry, PING and AUTH. It keeps a pool of connections so
+// concurrent requests don't queue behind each other, and can use TLS and a
+// password (as managed Redis services such as ElastiCache require).
 //
 // A cache failure never fails a request: errors are treated as a miss and
 // the request goes to the model as normal.
 type Redis struct {
-	addr    string
-	timeout time.Duration
-	pool    chan *redisConn
+	addr     string
+	timeout  time.Duration
+	pool     chan *redisConn
+	tls      *tls.Config
+	password string
+}
+
+// RedisOptions configures the client. Zero values mean plain TCP, no auth.
+type RedisOptions struct {
+	PoolSize int
+	// TLS enables encryption in transit. Use &tls.Config{} for a server whose
+	// certificate is signed by a public CA (ElastiCache is).
+	TLS *tls.Config
+	// Password is sent with AUTH on every new connection.
+	Password string
 }
 
 type redisConn struct {
@@ -29,13 +43,18 @@ type redisConn struct {
 	rd *bufio.Reader
 }
 
-// NewRedis creates a client with up to poolSize idle connections.
-// Connections are opened lazily, on first use.
-func NewRedis(addr string, poolSize int) *Redis {
-	if poolSize <= 0 {
-		poolSize = 10
+// NewRedis creates a client. Connections are opened lazily, on first use.
+func NewRedis(addr string, opts RedisOptions) *Redis {
+	if opts.PoolSize <= 0 {
+		opts.PoolSize = 10
 	}
-	return &Redis{addr: addr, timeout: 2 * time.Second, pool: make(chan *redisConn, poolSize)}
+	return &Redis{
+		addr:     addr,
+		timeout:  2 * time.Second,
+		pool:     make(chan *redisConn, opts.PoolSize),
+		tls:      opts.TLS,
+		password: opts.Password,
+	}
 }
 
 func (r *Redis) Get(ctx context.Context, key string) ([]byte, bool) {
@@ -64,11 +83,41 @@ func (r *Redis) get(ctx context.Context) (*redisConn, error) {
 	default:
 	}
 	d := net.Dialer{Timeout: r.timeout}
-	c, err := d.DialContext(ctx, "tcp", r.addr)
+	var c net.Conn
+	var err error
+	if r.tls != nil {
+		td := tls.Dialer{NetDialer: &d, Config: r.tls}
+		c, err = td.DialContext(ctx, "tcp", r.addr)
+	} else {
+		c, err = d.DialContext(ctx, "tcp", r.addr)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return &redisConn{Conn: c, rd: bufio.NewReader(c)}, nil
+	rc := &redisConn{Conn: c, rd: bufio.NewReader(c)}
+
+	if r.password != "" {
+		_ = c.SetDeadline(time.Now().Add(r.timeout))
+		if err := writeCommand(c, "AUTH", r.password); err != nil {
+			c.Close()
+			return nil, err
+		}
+		if _, err := readReply(rc.rd); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("redis auth: %w", err)
+		}
+	}
+	return rc, nil
+}
+
+func writeCommand(w io.Writer, args ...string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "*%d\r\n", len(args))
+	for _, a := range args {
+		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // put returns a healthy connection to the pool, or closes it if the pool is full.
@@ -92,12 +141,7 @@ func (r *Redis) do(ctx context.Context, args ...string) ([]byte, error) {
 	_ = c.SetDeadline(deadline)
 
 	// Commands are sent as a RESP array of bulk strings.
-	var b strings.Builder
-	fmt.Fprintf(&b, "*%d\r\n", len(args))
-	for _, a := range args {
-		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
-	}
-	if _, err := io.WriteString(c, b.String()); err != nil {
+	if err := writeCommand(c, args...); err != nil {
 		c.Close()
 		return nil, err
 	}

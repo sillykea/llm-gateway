@@ -127,7 +127,7 @@ func readCommand(rd *bufio.Reader) ([]string, error) {
 
 func TestRedis(t *testing.T) {
 	ctx := context.Background()
-	r := NewRedis(fakeRedis(t), 4)
+	r := NewRedis(fakeRedis(t), RedisOptions{PoolSize: 4})
 
 	if err := r.Ping(ctx); err != nil {
 		t.Fatalf("ping: %v", err)
@@ -142,7 +142,7 @@ func TestRedis(t *testing.T) {
 }
 
 func TestRedisDownIsAMiss(t *testing.T) {
-	r := NewRedis("127.0.0.1:1", 1) // nothing listens here
+	r := NewRedis("127.0.0.1:1", RedisOptions{PoolSize: 1}) // nothing listens here
 	if _, ok := r.Get(context.Background(), "k"); ok {
 		t.Error("an unreachable Redis should behave like a cache miss")
 	}
@@ -150,7 +150,7 @@ func TestRedisDownIsAMiss(t *testing.T) {
 
 func TestRedisConcurrent(t *testing.T) {
 	ctx := context.Background()
-	r := NewRedis(fakeRedis(t), 4)
+	r := NewRedis(fakeRedis(t), RedisOptions{PoolSize: 4})
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
