@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-gateway-config
+data:
+  gateway.json: |
+    {
+      "listen": ":8080",
+      "api_keys": [{ "name": "default", "key_env": "GATEWAY_API_KEY", "rpm": 120, "monthly_budget_usd": 200 }],
+      "providers": [
+        { "name": "ollama", "type": "ollama", "base_url": "http://ollama:11434", "local": true, "timeout_seconds": 120 },
+        { "name": "openai", "type": "openai", "base_url": "https://api.openai.com", "api_key_env": "OPENAI_API_KEY" }
+      ],
+      "models": {
+        "chat-default": [
+          { "provider": "openai", "model": "gpt-4o-mini" },
+          { "provider": "ollama", "model": "llama3.1:8b" }
+        ]
+      },
+      "pii": { "mode": "route_local" },
+      "cache": { "backend": "redis", "redis_addr": "redis:6379", "ttl_seconds": 3600 },
+      "limits": { "max_in_flight": 256, "breaker_threshold": 5, "breaker_cooldown_seconds": 30 }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: llm-gateway }
+  template:
+    metadata:
+      labels: { app: llm-gateway }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      # Longer than the 30s drain in main.go, so Kubernetes never kills the
+      # process while it is still finishing requests.
+      terminationGracePeriodSeconds: 40
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: llm-gateway }
+      containers:
+        - name: gateway
+          image: ghcr.io/sillykea/llm-gateway:latest
+          args: ["-config", "/etc/gateway/gateway.json"]
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - secretRef: { name: llm-gateway-secrets }
+          volumeMounts:
+            - { name: config, mountPath: /etc/gateway }
+          lifecycle:
+            # Give the load balancer a moment to stop sending traffic before
+            # shutdown starts, so no request lands on a closing listener.
+            preStop:
+              sleep: { seconds: 5 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: config
+          configMap: { name: llm-gateway-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway
+spec:
+  selector: { app: llm-gateway }
+  ports: [{ port: 80, targetPort: 8080 }]
