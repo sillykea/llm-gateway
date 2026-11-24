@@ -89,7 +89,7 @@ Everything lives in [`configs/gateway.json`](configs/gateway.json). Secrets are 
 | `providers` | `name`, `type` (`openai`/`ollama`), `base_url`, `api_key_env`, `local`, `timeout_seconds` |
 | `models` | alias → ordered list of `{provider, model}` |
 | `pii` | `mode` |
-| `cache` | `backend` (`memory`/`redis`/`off`), `redis_addr`, `ttl_seconds`, `redis_pool` |
+| `cache` | `backend` (`memory`/`redis`/`off`), `redis_addr`, `ttl_seconds`, `redis_pool`, `redis_tls`, `redis_password_env` |
 | `limits` | `max_in_flight`, `breaker_threshold`, `breaker_cooldown_seconds` |
 | `pricing` | model → `input_per_1k`, `output_per_1k` (USD) |
 
