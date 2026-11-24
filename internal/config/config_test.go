@@ -49,3 +49,27 @@ func TestValidateCatchesMistakes(t *testing.T) {
 		}
 	}
 }
+
+func TestRedisPasswordFromEnv(t *testing.T) {
+	t.Setenv("REDIS_PW", "pw")
+	cfg, err := Load(write(t, `{
+		"providers": [{"name": "local", "type": "ollama", "base_url": "http://x"}],
+		"models": {"chat": [{"provider": "local", "model": "m"}]},
+		"cache": {"backend": "redis", "redis_addr": "r:6379", "redis_tls": true, "redis_password_env": "REDIS_PW"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Cache.RedisTLS || cfg.Cache.RedisPassword != "pw" {
+		t.Errorf("got %+v", cfg.Cache)
+	}
+
+	t.Setenv("REDIS_PW", "")
+	if _, err := Load(write(t, `{
+		"providers": [{"name": "local", "type": "ollama", "base_url": "http://x"}],
+		"models": {"chat": [{"provider": "local", "model": "m"}]},
+		"cache": {"backend": "redis", "redis_addr": "r:6379", "redis_password_env": "REDIS_PW"}
+	}`)); err == nil {
+		t.Error("an empty password variable should fail validation")
+	}
+}

@@ -74,6 +74,13 @@ type Cache struct {
 	TTLSeconds int    `json:"ttl_seconds"`
 	MaxEntries int    `json:"max_entries"` // memory backend only
 	RedisPool  int    `json:"redis_pool"`  // redis backend only
+	// RedisTLS encrypts traffic to Redis. Required by ElastiCache when
+	// in-transit encryption is on.
+	RedisTLS bool `json:"redis_tls"`
+	// RedisPasswordEnv names the environment variable holding the Redis
+	// AUTH password. Empty means no password.
+	RedisPasswordEnv string `json:"redis_password_env"`
+	RedisPassword    string `json:"-"`
 }
 
 // ModelPricing is the cost in USD per 1,000 tokens, used for cost metrics.
@@ -139,6 +146,9 @@ func (c *Config) resolveSecrets() {
 	for i := range c.APIKeys {
 		c.APIKeys[i].Key = os.Getenv(c.APIKeys[i].KeyEnv)
 	}
+	if c.Cache.RedisPasswordEnv != "" {
+		c.Cache.RedisPassword = os.Getenv(c.Cache.RedisPasswordEnv)
+	}
 	for i := range c.Providers {
 		if c.Providers[i].APIKeyEnv != "" {
 			c.Providers[i].APIKey = os.Getenv(c.Providers[i].APIKeyEnv)
@@ -189,6 +199,9 @@ func (c *Config) Validate() error {
 	case "redis":
 		if c.Cache.RedisAddr == "" {
 			errs = append(errs, errors.New("cache.redis_addr is required for the redis backend"))
+		}
+		if c.Cache.RedisPasswordEnv != "" && c.Cache.RedisPassword == "" {
+			errs = append(errs, fmt.Errorf("cache: environment variable %s is empty", c.Cache.RedisPasswordEnv))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("cache.backend %q is not valid", c.Cache.Backend))
