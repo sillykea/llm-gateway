@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -72,7 +73,11 @@ func run(configPath string, log *slog.Logger) error {
 	case "memory":
 		c = cache.NewMemory(cfg.Cache.MaxEntries)
 	case "redis":
-		r := cache.NewRedis(cfg.Cache.RedisAddr, cfg.Cache.RedisPool)
+		opts := cache.RedisOptions{PoolSize: cfg.Cache.RedisPool, Password: cfg.Cache.RedisPassword}
+		if cfg.Cache.RedisTLS {
+			opts.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		r := cache.NewRedis(cfg.Cache.RedisAddr, opts)
 		c, ready = r, append(ready, r)
 	}
 
