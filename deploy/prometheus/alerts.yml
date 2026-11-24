@@ -1,0 +1,53 @@
+# Each alert links to the matching section of docs/runbook.md.
+groups:
+  - name: llm-gateway
+    rules:
+      - alert: GatewayHighErrorRate
+        expr: |
+          sum(rate(llm_gateway_requests_total{status="error"}[5m]))
+            / sum(rate(llm_gateway_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: More than 5% of upstream calls are failing
+          runbook: docs/runbook.md#high-error-rate
+
+      - alert: GatewayProviderCircuitOpen
+        expr: max by (provider) (llm_gateway_breaker_open) == 1
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Circuit breaker for {{ $labels.provider }} has been open for 5 minutes"
+          runbook: docs/runbook.md#circuit-breaker-open
+
+      - alert: GatewaySlowResponses
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(llm_gateway_request_duration_seconds_bucket[10m]))) > 10
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: p95 upstream latency above 10s
+          runbook: docs/runbook.md#slow-responses
+
+      - alert: GatewayLoadShedding
+        expr: sum(rate(llm_gateway_load_shed_total[5m])) > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: The gateway is turning requests away because it is at capacity
+          runbook: docs/runbook.md#load-shedding
+
+      - alert: GatewaySpendSpike
+        expr: sum(increase(llm_gateway_cost_usd_total[1h])) > 3 * sum(increase(llm_gateway_cost_usd_total[1h] offset 1d))
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: Spend this hour is more than 3x the same hour yesterday
+          runbook: docs/runbook.md#spend-spike
+
+      - alert: GatewayConfigReloadFailed
+        expr: increase(llm_gateway_config_reloads_total{result="error"}[15m]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: A config reload was rejected; the previous config is still running
+          runbook: docs/runbook.md#config-reload-failed
