@@ -45,13 +45,24 @@ type KeySource interface {
 	Lookup(token string) (config.APIKey, bool)
 }
 
+// RateLimiter decides whether a key may make another request.
+type RateLimiter interface {
+	Allow(key string, rpm int) (bool, time.Duration)
+}
+
+// Budgets tracks spend per key per month.
+type Budgets interface {
+	Add(key string, usd float64)
+	Exceeded(key string, limit float64) bool
+}
+
 // Server handles gateway HTTP traffic.
 type Server struct {
 	rt atomic.Pointer[runtime]
 
 	cache   cache.Cache // nil when caching is off
-	limiter *ratelimit.Limiter
-	budgets *budget.Tracker
+	limiter RateLimiter
+	budgets Budgets
 	metrics *metrics.Registry
 	log     *slog.Logger
 	ready   []Pinger
@@ -69,6 +80,9 @@ type Options struct {
 	Logger    *slog.Logger
 	Ready     []Pinger
 	Keys      KeySource
+	// Shared, when set, holds rate limits and budgets in Redis instead of
+	// in this process.
+	Shared ratelimit.Evaler
 }
 
 // New builds a server from options.
@@ -86,6 +100,22 @@ func New(o Options) (*Server, error) {
 		ready:    o.Ready,
 		remote:   o.Keys,
 		breakers: map[string]*breaker.Breaker{},
+	}
+	if o.Shared != nil {
+		// Count every failure, but log at most every 10s: during a Redis
+		// outage this runs on every request.
+		var lastLog atomic.Int64
+		onError := func(op string) func(error) {
+			return func(err error) {
+				s.metrics.Inc("llm_gateway_shared_state_errors_total", metrics.Labels{"op": op})
+				now := time.Now().Unix()
+				if last := lastLog.Load(); now-last >= 10 && lastLog.CompareAndSwap(last, now) {
+					s.log.Warn("shared state unavailable, using this replica's own count", "op", op, "error", err)
+				}
+			}
+		}
+		s.limiter = ratelimit.NewShared(o.Shared, onError("rate_limit"))
+		s.budgets = budget.NewShared(o.Shared, onError("budget"))
 	}
 	if err := s.Reload(o.Config, o.Providers); err != nil {
 		return nil, err

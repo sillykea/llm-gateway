@@ -99,3 +99,18 @@ func TestKeySource(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedLimitsNeedRedis(t *testing.T) {
+	t.Setenv("TEST_KEY", "abc")
+	base := `"api_keys": [{"name": "k", "key_env": "TEST_KEY"}],
+		"providers": [{"name": "local", "type": "ollama", "base_url": "http://x"}],
+		"models": {"chat": [{"provider": "local", "model": "llama3.1"}]},`
+	_, err := Load(write(t, `{`+base+` "limits": {"shared": true}}`))
+	if err == nil || !strings.Contains(err.Error(), "limits.shared") {
+		t.Errorf("shared limits with the memory cache: %v", err)
+	}
+	cfg, err := Load(write(t, `{`+base+` "limits": {"shared": true}, "cache": {"backend": "redis", "redis_addr": "redis:6379"}}`))
+	if err != nil || !cfg.Limits.Shared {
+		t.Errorf("shared limits with redis: %v", err)
+	}
+}

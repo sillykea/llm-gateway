@@ -42,6 +42,10 @@ type Limits struct {
 	// circuit breaker; BreakerCooldownSeconds is how long it stays open.
 	BreakerThreshold       int `json:"breaker_threshold"`
 	BreakerCooldownSeconds int `json:"breaker_cooldown_seconds"`
+	// Shared keeps rate limits and budgets in Redis (the cache's Redis), so
+	// every replica enforces one limit per key instead of one each. Needs
+	// cache.backend "redis". See docs/adr/0003.
+	Shared bool `json:"shared"`
 }
 
 // APIKey is a client key allowed to call the gateway.
@@ -222,6 +226,10 @@ func (c *Config) Validate() error {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("cache.backend %q is not valid", c.Cache.Backend))
+	}
+
+	if c.Limits.Shared && c.Cache.Backend != "redis" {
+		errs = append(errs, errors.New(`limits.shared needs cache.backend "redis"`))
 	}
 
 	if ks := c.KeySource; ks.URL != "" {

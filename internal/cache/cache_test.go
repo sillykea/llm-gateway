@@ -168,3 +168,22 @@ func TestRedisConcurrent(t *testing.T) {
 		t.Errorf("pool grew past its size: %d", len(r.pool))
 	}
 }
+
+func TestReadValue(t *testing.T) {
+	in := "*4\r\n:1\r\n$3\r\nabc\r\n$-1\r\n*2\r\n+OK\r\n-ERR inner\r\n"
+	v, err := readValue(bufio.NewReader(strings.NewReader(in)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arr := v.([]any)
+	inner := arr[3].([]any)
+	if arr[0] != int64(1) || arr[1] != "abc" || arr[2] != nil || inner[0] != "OK" || inner[1].(redisError) != "ERR inner" {
+		t.Errorf("got %#v", v)
+	}
+	if _, err := readValue(bufio.NewReader(strings.NewReader("-NOSCRIPT x\r\n"))); err == nil {
+		t.Error("top-level error reply not returned as an error")
+	}
+	if _, err := readValue(bufio.NewReader(strings.NewReader("*99999\r\n"))); err == nil {
+		t.Error("huge array accepted")
+	}
+}

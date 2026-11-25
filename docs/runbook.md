@@ -61,6 +61,17 @@ The gateway is refusing requests because every in-flight slot is taken.
    for slow responses first.
 3. Raise `limits.max_in_flight` only if CPU and memory have headroom.
 
+## Shared limits unavailable
+
+`llm_gateway_shared_state_errors_total` is rising: replicas can't reach Redis
+for rate limits or budgets, so each is enforcing its own count. Limits are up
+to N times looser until Redis is back; nothing is refused because of it.
+
+1. Check Redis (the cache's `redis_addr`): is it up, and is the gateway's
+   readiness probe failing too?
+2. If Redis will be down for long, lower `rpm` on the busiest keys for the
+   duration.
+
 ## Spend spike
 
 1. Dashboard: "Spend by key this month" shows which key it is.

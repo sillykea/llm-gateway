@@ -2,7 +2,10 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -465,5 +468,41 @@ func TestRemoteKeysAreAccepted(t *testing.T) {
 	}
 	if names := srv.ConfigKeyNames(); !names["test"] || names["team-a"] {
 		t.Fatalf("ConfigKeyNames = %v", names)
+	}
+}
+
+type redisDown struct{}
+
+func (redisDown) Eval(context.Context, string, []string, ...string) (any, error) {
+	return nil, errors.New("dial tcp: connection refused")
+}
+
+// With shared limits on and Redis down, requests are still served and still
+// limited, by this replica, and the failure shows up in the metrics.
+func TestSharedLimitsSurviveRedisOutage(t *testing.T) {
+	h := newHarness(t, "off", 0)
+	cfg := *h.server.current().cfg
+	cfg.APIKeys = []config.APIKey{{Name: "test", Key: "secret", RPM: 2, MonthlyBudgetUSD: 100}}
+	srv, err := New(Options{
+		Config: &cfg, Providers: h.providers, Cache: cache.NewMemory(10),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Shared: redisDown{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.handler = srv.Handler()
+	codes := []int{}
+	for i := range 3 {
+		rec, _ := h.chat(t, fmt.Sprint("question ", i))
+		codes = append(codes, rec.Code)
+	}
+	if codes[0] != 200 || codes[1] != 200 || codes[2] != 429 {
+		t.Errorf("status codes %v, want 200 200 429", codes)
+	}
+	if v := srv.Metrics().Value("llm_gateway_shared_state_errors_total", metrics.Labels{"op": "rate_limit"}); v != 3 {
+		t.Errorf("rate limit errors counted: %v", v)
+	}
+	if v := srv.Metrics().Value("llm_gateway_shared_state_errors_total", metrics.Labels{"op": "budget"}); v == 0 {
+		t.Error("budget errors not counted")
 	}
 }

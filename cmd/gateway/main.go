@@ -69,6 +69,7 @@ func run(configPath string, log *slog.Logger) error {
 	}
 
 	var c cache.Cache
+	var shared *cache.Redis
 	var ready []server.Pinger
 	switch cfg.Cache.Backend {
 	case "memory":
@@ -80,6 +81,9 @@ func run(configPath string, log *slog.Logger) error {
 		}
 		r := cache.NewRedis(cfg.Cache.RedisAddr, opts)
 		c, ready = r, append(ready, r)
+		if cfg.Limits.Shared {
+			shared = r
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -91,6 +95,9 @@ func run(configPath string, log *slog.Logger) error {
 	var keys *keysync.Syncer
 	var srv *server.Server
 	opts := server.Options{Config: cfg, Providers: providers, Cache: c, Logger: log, Ready: ready}
+	if shared != nil {
+		opts.Shared = shared
+	}
 	if ks := cfg.KeySource; ks.URL != "" {
 		keys = keysync.New(keysync.Options{
 			URL: ks.URL, Token: ks.Token,
@@ -164,8 +171,8 @@ func reload(path string, original *config.Config, srv *server.Server, log *slog.
 		log.Error("config reload failed, keeping the current config", "error", err)
 		return
 	}
-	if cfg.Listen != original.Listen || cfg.Cache.Backend != original.Cache.Backend || cfg.Cache.RedisAddr != original.Cache.RedisAddr {
-		log.Warn("listen address and cache settings change only on restart")
+	if cfg.Listen != original.Listen || cfg.Cache.Backend != original.Cache.Backend || cfg.Cache.RedisAddr != original.Cache.RedisAddr || cfg.Limits.Shared != original.Limits.Shared {
+		log.Warn("listen address, cache and shared-limit settings change only on restart")
 	}
 	log.Info("config reloaded", "models", len(cfg.Models), "providers", len(cfg.Providers))
 }

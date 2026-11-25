@@ -3,7 +3,9 @@ package cache
 import (
 	"bufio"
 	"context"
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +71,25 @@ func (r *Redis) Set(ctx context.Context, key string, value []byte, ttl time.Dura
 	_, _ = r.do(ctx, "SET", key, string(value), "EX", strconv.Itoa(int(ttl.Seconds())))
 }
 
+// Eval runs a Lua script atomically on the server. It sends EVALSHA first and
+// falls back to EVAL only when the server hasn't seen the script yet, so the
+// script body crosses the network once per server, not once per call.
+//
+// Integer replies come back as int64, strings as string, arrays as []any and
+// nil as nil.
+func (r *Redis) Eval(ctx context.Context, script string, keys []string, args ...string) (any, error) {
+	sum := sha1.Sum([]byte(script))
+	sha := hex.EncodeToString(sum[:])
+	cmd := append([]string{"EVALSHA", sha, strconv.Itoa(len(keys))}, keys...)
+	v, err := r.doValue(ctx, append(cmd, args...)...)
+	var re redisError
+	if errors.As(err, &re) && strings.HasPrefix(string(re), "NOSCRIPT") {
+		cmd[0], cmd[1] = "EVAL", script
+		v, err = r.doValue(ctx, append(cmd, args...)...)
+	}
+	return v, err
+}
+
 // Ping is used by the readiness probe.
 func (r *Redis) Ping(ctx context.Context) error {
 	_, err := r.do(ctx, "PING")
@@ -130,9 +151,19 @@ func (r *Redis) put(c *redisConn) {
 }
 
 func (r *Redis) do(ctx context.Context, args ...string) ([]byte, error) {
+	return roundTrip(r, ctx, args, readReply)
+}
+
+func (r *Redis) doValue(ctx context.Context, args ...string) (any, error) {
+	return roundTrip(r, ctx, args, readValue)
+}
+
+// roundTrip sends one command on a pooled connection and reads the reply.
+func roundTrip[T any](r *Redis, ctx context.Context, args []string, read func(*bufio.Reader) (T, error)) (T, error) {
+	var zero T
 	c, err := r.get(ctx)
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
 	deadline := time.Now().Add(r.timeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
@@ -143,14 +174,14 @@ func (r *Redis) do(ctx context.Context, args ...string) ([]byte, error) {
 	// Commands are sent as a RESP array of bulk strings.
 	if err := writeCommand(c, args...); err != nil {
 		c.Close()
-		return nil, err
+		return zero, err
 	}
 
-	v, err := readReply(c.rd)
+	v, err := read(c.rd)
 	var redisErr redisError
 	if err != nil && !errors.As(err, &redisErr) {
 		c.Close() // the connection is in an unknown state, don't reuse it
-		return nil, err
+		return zero, err
 	}
 	r.put(c)
 	return v, err
@@ -189,6 +220,66 @@ func readReply(rd *bufio.Reader) ([]byte, error) {
 			return nil, err
 		}
 		return buf[:n], nil
+	}
+	return nil, fmt.Errorf("redis: unexpected reply %q", line[0])
+}
+
+// readValue reads any reply, including arrays (which script results use).
+func readValue(rd *bufio.Reader) (any, error) {
+	line, err := rd.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	if len(line) < 3 {
+		return nil, errors.New("redis: short reply")
+	}
+	body := line[1 : len(line)-2]
+	switch line[0] {
+	case '+':
+		return body, nil
+	case '-':
+		return nil, redisError(body)
+	case ':':
+		return strconv.ParseInt(body, 10, 64)
+	case '$':
+		n, err := strconv.Atoi(body)
+		if err != nil {
+			return nil, err
+		}
+		if n < 0 {
+			return nil, nil
+		}
+		buf := make([]byte, n+2)
+		if _, err := io.ReadFull(rd, buf); err != nil {
+			return nil, err
+		}
+		return string(buf[:n]), nil
+	case '*':
+		n, err := strconv.Atoi(body)
+		if err != nil {
+			return nil, err
+		}
+		if n < 0 {
+			return nil, nil
+		}
+		if n > 1024 {
+			return nil, fmt.Errorf("redis: array of %d elements is larger than expected", n)
+		}
+		out := make([]any, n)
+		for i := range out {
+			// An error inside an array is a value, not a failed read.
+			v, err := readValue(rd)
+			var re redisError
+			if errors.As(err, &re) {
+				out[i] = re
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			out[i] = v
+		}
+		return out, nil
 	}
 	return nil, fmt.Errorf("redis: unexpected reply %q", line[0])
 }

@@ -90,7 +90,7 @@ Everything lives in [`configs/gateway.json`](configs/gateway.json). Secrets are 
 | `models` | alias → ordered list of `{provider, model}` |
 | `pii` | `mode` |
 | `cache` | `backend` (`memory`/`redis`/`off`), `redis_addr`, `ttl_seconds`, `redis_pool`, `redis_tls`, `redis_password_env` |
-| `limits` | `max_in_flight`, `breaker_threshold`, `breaker_cooldown_seconds` |
+| `limits` | `max_in_flight`, `breaker_threshold`, `breaker_cooldown_seconds`, `shared`: keep rate limits and budgets in Redis so all replicas enforce one limit (needs the Redis cache) |
 | `pricing` | model → `input_per_1k`, `output_per_1k` (USD) |
 | `key_source` | `url`, `token_env`, `refresh_seconds`: pull extra keys (as SHA-256 hashes) from [llm-gateway-console](https://github.com/sillykea/llm-gateway-console). See [ADR 6](docs/adr/0006-keys-from-the-console.md). |
 
@@ -136,14 +136,13 @@ Decision records:
 
 1. [Standard library only](docs/adr/0001-standard-library-only.md)
 2. [Fail closed on personal data, fail open on the cache](docs/adr/0002-fail-closed-on-personal-data.md)
-3. [Rate limits, budgets and breakers per replica, for now](docs/adr/0003-per-replica-state.md)
+3. [Rate limits, budgets and breakers per replica, with shared limits in Redis as an option](docs/adr/0003-per-replica-state.md)
 4. [Only fall back before the first streamed byte](docs/adr/0004-streaming-fallback.md)
 5. [Shed load instead of queueing](docs/adr/0005-load-shedding.md)
 6. [Pull API keys from the console, as hashes](docs/adr/0006-keys-from-the-console.md)
 
 ## Roadmap
 
-- Shared rate limits and budgets in Redis (design in ADR 3)
 - OpenTelemetry tracing across gateway and providers
 - Embeddings endpoint
 - Semantic caching with vector similarity
