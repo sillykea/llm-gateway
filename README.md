@@ -92,6 +92,7 @@ Everything lives in [`configs/gateway.json`](configs/gateway.json). Secrets are 
 | `cache` | `backend` (`memory`/`redis`/`off`), `redis_addr`, `ttl_seconds`, `redis_pool`, `redis_tls`, `redis_password_env` |
 | `limits` | `max_in_flight`, `breaker_threshold`, `breaker_cooldown_seconds` |
 | `pricing` | model → `input_per_1k`, `output_per_1k` (USD) |
+| `key_source` | `url`, `token_env`, `refresh_seconds`: pull extra keys (as SHA-256 hashes) from [llm-gateway-console](https://github.com/sillykea/llm-gateway-console). See [ADR 6](docs/adr/0006-keys-from-the-console.md). |
 
 ## Running on Kubernetes
 
@@ -138,6 +139,7 @@ Decision records:
 3. [Rate limits, budgets and breakers per replica, for now](docs/adr/0003-per-replica-state.md)
 4. [Only fall back before the first streamed byte](docs/adr/0004-streaming-fallback.md)
 5. [Shed load instead of queueing](docs/adr/0005-load-shedding.md)
+6. [Pull API keys from the console, as hashes](docs/adr/0006-keys-from-the-console.md)
 
 ## Roadmap
 
