@@ -21,6 +21,7 @@ import (
 
 	"github.com/sillykea/llm-gateway/internal/cache"
 	"github.com/sillykea/llm-gateway/internal/config"
+	"github.com/sillykea/llm-gateway/internal/keysync"
 	"github.com/sillykea/llm-gateway/internal/provider"
 	"github.com/sillykea/llm-gateway/internal/server"
 )
@@ -81,9 +82,32 @@ func run(configPath string, log *slog.Logger) error {
 		c, ready = r, append(ready, r)
 	}
 
-	srv, err := server.New(server.Options{Config: cfg, Providers: providers, Cache: c, Logger: log, Ready: ready})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Keys managed in the console. The syncer needs the server (for the
+	// config file's key names) and the server needs the syncer, so the
+	// reserved-names hook is bound after both exist.
+	var keys *keysync.Syncer
+	var srv *server.Server
+	opts := server.Options{Config: cfg, Providers: providers, Cache: c, Logger: log, Ready: ready}
+	if ks := cfg.KeySource; ks.URL != "" {
+		keys = keysync.New(keysync.Options{
+			URL: ks.URL, Token: ks.Token,
+			Interval: time.Duration(ks.RefreshSeconds) * time.Second,
+			Logger:   log,
+			Reserved: func() map[string]bool { return srv.ConfigKeyNames() },
+		})
+		opts.Keys = keys
+		opts.Ready = append(opts.Ready, keys)
+	}
+	srv, err = server.New(opts)
 	if err != nil {
 		return err
+	}
+	if keys != nil {
+		keys.UseMetrics(srv.Metrics())
+		go keys.Run(ctx)
 	}
 
 	httpServer := &http.Server{
@@ -94,9 +118,6 @@ func run(configPath string, log *slog.Logger) error {
 		// No WriteTimeout: it would cut off long streamed answers. Each
 		// upstream call has its own timeout instead.
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
