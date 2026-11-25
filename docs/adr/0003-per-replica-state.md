@@ -1,4 +1,4 @@
-# 3. Keep rate limits, budgets and breakers per replica (for now)
+# 3. Rate limits, budgets and breakers per replica, with shared limits as an option
 
 Status: accepted; amended by the update below, which adds shared limits as an option
 

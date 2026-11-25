@@ -43,7 +43,7 @@ There are two kinds of state:
 | Kind | Examples | Lifetime |
 |---|---|---|
 | Config-derived | API keys, routes, limits | Replaced as one unit on `SIGHUP` |
-| Operational | rate-limit buckets, budgets, breakers, metrics, cache | Lives as long as the process |
+| Operational | rate-limit buckets, budgets, breakers, metrics, cache | Lives as long as the process; with `limits.shared`, buckets and budgets live in Redis instead (ADR 3) |
 
 Config-derived state sits behind an `atomic.Pointer`. A request loads it once
 at the start and uses that copy throughout, so a reload can't change the
@@ -60,10 +60,11 @@ internal/server     middleware chain and the chat pipeline
 internal/router     alias -> ordered targets, local-only filtering
 internal/provider   OpenAI-compatible and Ollama clients, streaming
 internal/breaker    circuit breaker per provider
-internal/budget     monthly spend per key
-internal/ratelimit  token bucket per key
+internal/budget     monthly spend per key, in memory or Redis (INCRBYFLOAT)
+internal/ratelimit  token bucket per key, in memory or Redis (Lua script)
+internal/tracing    W3C traceparent, spans, OTLP/HTTP JSON export
 internal/pii        windowed personal data detection and redaction
-internal/cache      LRU and pooled Redis (RESP, optional TLS + AUTH) backends
+internal/cache      LRU and pooled Redis (RESP, EVALSHA, optional TLS + AUTH) backends
 internal/metrics    Prometheus text exposition
 internal/config     loading, defaults, validation
 ```
@@ -79,7 +80,8 @@ tested against `httptest` servers, not mocks of their own interfaces.
 | A provider returns 5xx, 429 or times out | Falls back to the next target. Repeated failures open its breaker. |
 | A provider returns 4xx | Returns it to the client unchanged. The breaker is not affected. |
 | Every target's breaker is open | 503 with `Retry-After` set to the cooldown |
-| Redis is down | Cache misses, requests carry on. `/readyz` reports not ready. |
+| Redis is down | Cache misses, requests carry on. `/readyz` reports not ready. Shared limits fall back to each replica's own count, and `shared_state_errors_total` rises. |
+| The trace collector is down or slow | Spans are dropped and counted (`spans_total{result="dropped"}`); requests are unaffected. |
 | Too many concurrent requests | 503 with `Retry-After: 1` (load shedding) |
 | Personal data and no local target | 422 rather than send it to a hosted provider |
 | Stream breaks after the first chunk | An error event inside the stream, no fallback |
