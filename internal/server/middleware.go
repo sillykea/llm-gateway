@@ -14,6 +14,7 @@ import (
 
 	"github.com/sillykea/llm-gateway/internal/config"
 	"github.com/sillykea/llm-gateway/internal/metrics"
+	"github.com/sillykea/llm-gateway/internal/tracing"
 )
 
 type keyCtx struct{}
@@ -75,8 +76,35 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
 			return // probes and scrapes would drown out real traffic
 		}
-		s.log.Info("http", "method", r.Method, "path", r.URL.Path, "status", rec.status,
-			"ms", time.Since(start).Milliseconds(), "request_id", requestID(r))
+		attrs := []any{"method", r.Method, "path", r.URL.Path, "status", rec.status,
+			"ms", time.Since(start).Milliseconds(), "request_id", requestID(r)}
+		if id := tracing.FromContext(r.Context()).TraceID(); id != "" {
+			attrs = append(attrs, "trace_id", id)
+		}
+		s.log.Info("http", attrs...)
+	})
+}
+
+// withTracing starts a server span for API requests, continuing the
+// caller's trace when it sends traceparent.
+func (s *Server) withTracing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.tracer == nil || !strings.HasPrefix(r.URL.Path, "/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx, span := s.tracer.StartServer(r, r.Method+" "+r.URL.Path)
+		defer span.End()
+		r = r.WithContext(ctx)
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		span.Set("http.request.method", r.Method)
+		span.Set("http.route", r.Pattern)
+		span.Set("http.response.status_code", rec.status)
+		span.Set("gateway.request_id", requestID(r))
+		if rec.status >= 500 {
+			span.Fail(fmt.Errorf("HTTP %d", rec.status))
+		}
 	})
 }
 
@@ -121,13 +149,17 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
+		span := tracing.FromContext(r.Context())
+		span.Set("gateway.api_key", key.Name)
 		if ok, wait := s.limiter.Allow(key.Name, key.RPM); !ok {
+			span.Set("gateway.rejected", "rate_limit")
 			s.metrics.Inc("llm_gateway_rate_limited_total", metrics.Labels{"key": key.Name})
 			w.Header().Set("Retry-After", fmt.Sprint(int(math.Ceil(wait.Seconds()))))
 			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "rate limit exceeded")
 			return
 		}
 		if s.budgets.Exceeded(key.Name, key.MonthlyBudgetUSD) {
+			span.Set("gateway.rejected", "budget")
 			s.metrics.Inc("llm_gateway_budget_exceeded_total", metrics.Labels{"key": key.Name})
 			writeError(w, http.StatusTooManyRequests, "insufficient_quota",
 				fmt.Sprintf("monthly budget of $%.2f reached", key.MonthlyBudgetUSD))

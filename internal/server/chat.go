@@ -16,6 +16,7 @@ import (
 	"github.com/sillykea/llm-gateway/internal/pii"
 	"github.com/sillykea/llm-gateway/internal/provider"
 	"github.com/sillykea/llm-gateway/internal/router"
+	"github.com/sillykea/llm-gateway/internal/tracing"
 )
 
 // call is one chat request on its way through the pipeline.
@@ -39,6 +40,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	case rt.slots <- struct{}{}:
 		defer func() { <-rt.slots }()
 	default:
+		tracing.FromContext(r.Context()).Set("gateway.rejected", "load_shed")
 		s.metrics.Inc("llm_gateway_load_shed_total", nil)
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, "overloaded", "gateway is at capacity, retry shortly")
@@ -75,6 +77,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.targets = targets
+
+	span := tracing.FromContext(r.Context())
+	span.Set("gen_ai.request.model", c.req.Model)
+	span.Set("gateway.pii", c.piiTypes)
+	span.Set("gateway.local_only", c.localOnly)
+	span.Set("gateway.stream", c.req.Stream)
 
 	if c.req.Stream {
 		s.streamChat(w, r, c)
@@ -130,7 +138,9 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, c *call) {
 	var cacheKey string
 	if s.cache != nil && cache.Cacheable(c.req) {
 		cacheKey = cache.Key(c.req) + fmt.Sprintf(":local=%t", c.localOnly)
-		if data, hit := s.cache.Get(r.Context(), cacheKey); hit {
+		data, hit := s.cache.Get(r.Context(), cacheKey)
+		tracing.FromContext(r.Context()).Set("gateway.cache_hit", hit)
+		if hit {
 			s.metrics.Inc("llm_gateway_cache_hits_total", metrics.Labels{"model": c.req.Model})
 			w.Header().Set("X-Cache", "HIT")
 			w.Header().Set("Content-Type", "application/json")
@@ -146,6 +156,7 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, c *call) {
 		resp, err = t.Provider.Chat(ctx, t.Model, c.req)
 		if err == nil {
 			s.recordUsage(c.key, t, resp.Usage)
+			setUsage(ctx, resp.Usage)
 		}
 		return err
 	})
@@ -197,6 +208,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, c *call) {
 		}
 		usage, err := t.Provider.Stream(ctx, t.Model, c.req, emit)
 		s.recordUsage(c.key, t, usage) // count partial streams too: they were paid for
+		setUsage(ctx, usage)
 		if err != nil && started {
 			// Fallback is only possible before the first chunk. After that the
 			// client has seen part of an answer, so mark the error as final.
@@ -232,17 +244,27 @@ var errAllUnavailable = errors.New("all providers are temporarily unavailable")
 // providers whose breaker is open and falling back on retryable errors.
 func (s *Server) tryTargets(r *http.Request, c *call, do func(context.Context, router.Target) error) (router.Target, error) {
 	var lastErr error
+	parent := tracing.FromContext(r.Context())
 	for i, t := range c.targets {
 		name := t.Provider.Name()
 		b := s.breaker(name)
 		if !b.Allow() {
 			s.metrics.Inc("llm_gateway_breaker_skips_total", metrics.Labels{"provider": name})
+			parent.Set("gateway.breaker_skipped."+name, true)
 			continue
 		}
 
+		// One client span per attempt, so a fallback shows as two calls.
+		ctx, span := tracing.Start(r.Context(), "chat "+t.Model, tracing.Client)
+		span.Set("gen_ai.operation.name", "chat")
+		span.Set("gen_ai.provider.name", name)
+		span.Set("gen_ai.request.model", t.Model)
+		span.Set("gateway.attempt", i+1)
 		start := time.Now()
-		err := do(r.Context(), t)
+		err := do(ctx, t)
 		elapsed := time.Since(start).Seconds()
+		span.Fail(err)
+		span.End()
 		s.metrics.ObserveDuration(metrics.Labels{"provider": name, "model": t.Model}, elapsed)
 		s.recordBreaker(b, name, err)
 
@@ -253,6 +275,8 @@ func (s *Server) tryTargets(r *http.Request, c *call, do func(context.Context, r
 		s.metrics.Inc("llm_gateway_requests_total", metrics.Labels{"alias": c.req.Model, "provider": name, "status": status, "key": c.key})
 
 		if err == nil {
+			parent.Set("gen_ai.provider.name", name)
+			parent.Set("gen_ai.response.model", t.Model)
 			s.log.Info("chat completed", "alias", c.req.Model, "provider", name, "model", t.Model,
 				"seconds", elapsed, "pii", c.piiTypes, "key", c.key, "request_id", requestID(r))
 			return t, nil
@@ -302,6 +326,13 @@ func (s *Server) writeUpstreamError(w http.ResponseWriter, c *call, err error) {
 		status = ue.Status // pass client errors (e.g. 400) straight through
 	}
 	writeError(w, status, "upstream_error", "all providers failed: "+err.Error())
+}
+
+// setUsage records token counts on the provider call's span.
+func setUsage(ctx context.Context, u api.Usage) {
+	span := tracing.FromContext(ctx)
+	span.Set("gen_ai.usage.input_tokens", u.PromptTokens)
+	span.Set("gen_ai.usage.output_tokens", u.CompletionTokens)
 }
 
 func (s *Server) recordUsage(key string, t router.Target, u api.Usage) {

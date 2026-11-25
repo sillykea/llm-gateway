@@ -47,7 +47,11 @@ flowchart LR
 
 **Zero-downtime config changes.** Send `SIGHUP` to reload the config. In-flight requests finish under the old config. An invalid config is rejected and the running one stays in place.
 
-**Operable.** It exposes Prometheus metrics, provides a Grafana dashboard and alert rules, writes JSON logs with request IDs, and has health and readiness probes and graceful shutdown. A [runbook](docs/runbook.md) covers every alert.
+**Shared limits.** With `limits.shared`, rate limits and budgets live in Redis, so ten replicas enforce one limit per key, not ten. The rate limiter is a Lua token bucket on Redis's clock; if Redis goes away, each replica falls back to counting on its own instead of failing requests.
+
+**Tracing.** Set `tracing.otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) and every request becomes a trace, with one span per provider attempt, token counts and cache hits as attributes. The gateway continues the caller's W3C `traceparent` and passes it to the model server, so one trace runs from the app through the gateway into vLLM or Ollama. It's exported as OTLP/HTTP to any OpenTelemetry collector, Jaeger or Tempo, without the SDK ([ADR 7](docs/adr/0007-tracing-without-the-sdk.md)).
+
+**Operable.** It exposes Prometheus metrics, provides a Grafana dashboard and alert rules, writes JSON logs with request and trace IDs, and has health and readiness probes and graceful shutdown. A [runbook](docs/runbook.md) covers every alert.
 
 Every response carries `X-Gateway-Provider`, `X-Gateway-Model`, `X-Gateway-PII`, `X-Cache` and `X-Request-ID` headers.
 
@@ -71,7 +75,7 @@ curl localhost:8080/v1/chat/completions -i \
 - Put an email address in the message and watch `X-Gateway-Provider` switch to `ollama`.
 - Edit `configs/gateway.json`, then run `make reload` to apply it without a restart.
 
-Grafana is at http://localhost:3000 and Prometheus at http://localhost:9090.
+Grafana is at http://localhost:3000, Prometheus at http://localhost:9090 and traces in Jaeger at http://localhost:16686.
 
 ```python
 from openai import OpenAI
@@ -93,6 +97,7 @@ Everything lives in [`configs/gateway.json`](configs/gateway.json). Secrets are 
 | `limits` | `max_in_flight`, `breaker_threshold`, `breaker_cooldown_seconds`, `shared`: keep rate limits and budgets in Redis so all replicas enforce one limit (needs the Redis cache) |
 | `pricing` | model → `input_per_1k`, `output_per_1k` (USD) |
 | `key_source` | `url`, `token_env`, `refresh_seconds`: pull extra keys (as SHA-256 hashes) from [llm-gateway-console](https://github.com/sillykea/llm-gateway-console). See [ADR 6](docs/adr/0006-keys-from-the-console.md). |
+| `tracing` | `otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`), `service_name`, `sample_ratio` (default 1) |
 
 ## Running on Kubernetes
 
@@ -140,10 +145,10 @@ Decision records:
 4. [Only fall back before the first streamed byte](docs/adr/0004-streaming-fallback.md)
 5. [Shed load instead of queueing](docs/adr/0005-load-shedding.md)
 6. [Pull API keys from the console, as hashes](docs/adr/0006-keys-from-the-console.md)
+7. [Trace with W3C trace context and OTLP, without the OpenTelemetry SDK](docs/adr/0007-tracing-without-the-sdk.md)
 
 ## Roadmap
 
-- OpenTelemetry tracing across gateway and providers
 - Embeddings endpoint
 - Semantic caching with vector similarity
 - Detecting names and addresses with a small local NER model

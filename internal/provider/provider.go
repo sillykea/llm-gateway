@@ -14,6 +14,7 @@ import (
 
 	"github.com/sillykea/llm-gateway/internal/api"
 	"github.com/sillykea/llm-gateway/internal/config"
+	"github.com/sillykea/llm-gateway/internal/tracing"
 )
 
 // Provider sends a chat request to one backend.
@@ -78,6 +79,7 @@ func send(ctx context.Context, client *http.Client, name, url string, headers ma
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	tracing.Inject(ctx, req.Header) // carry the trace into the model server
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

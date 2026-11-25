@@ -22,8 +22,10 @@ import (
 	"github.com/sillykea/llm-gateway/internal/cache"
 	"github.com/sillykea/llm-gateway/internal/config"
 	"github.com/sillykea/llm-gateway/internal/keysync"
+	"github.com/sillykea/llm-gateway/internal/metrics"
 	"github.com/sillykea/llm-gateway/internal/provider"
 	"github.com/sillykea/llm-gateway/internal/server"
+	"github.com/sillykea/llm-gateway/internal/tracing"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -98,6 +100,11 @@ func run(configPath string, log *slog.Logger) error {
 	if shared != nil {
 		opts.Shared = shared
 	}
+	var exporter *tracing.Exporter
+	if tr := cfg.Tracing; tr.OTLPEndpoint != "" {
+		exporter = tracing.NewExporter(tr.OTLPEndpoint, tr.ServiceName)
+		opts.Tracer = tracing.New(exporter, *tr.SampleRatio)
+	}
 	if ks := cfg.KeySource; ks.URL != "" {
 		keys = keysync.New(keysync.Options{
 			URL: ks.URL, Token: ks.Token,
@@ -115,6 +122,25 @@ func run(configPath string, log *slog.Logger) error {
 	if keys != nil {
 		keys.UseMetrics(srv.Metrics())
 		go keys.Run(ctx)
+	}
+	if exporter != nil {
+		m := srv.Metrics()
+		exporter.OnDrop = func(n int) { m.Add("llm_gateway_spans_total", metrics.Labels{"result": "dropped"}, float64(n)) }
+		exporter.OnExport = func(n int, err error) {
+			result := "exported"
+			if err != nil {
+				result = "export_failed"
+				log.Warn("trace export failed", "spans", n, "error", err)
+			}
+			m.Add("llm_gateway_spans_total", metrics.Labels{"result": result}, float64(n))
+		}
+		exporter.Start()
+		defer func() {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			exporter.Shutdown(flushCtx) // send spans from the last requests
+		}()
+		log.Info("tracing on", "endpoint", cfg.Tracing.OTLPEndpoint, "sample_ratio", *cfg.Tracing.SampleRatio)
 	}
 
 	httpServer := &http.Server{
@@ -171,7 +197,7 @@ func reload(path string, original *config.Config, srv *server.Server, log *slog.
 		log.Error("config reload failed, keeping the current config", "error", err)
 		return
 	}
-	if cfg.Listen != original.Listen || cfg.Cache.Backend != original.Cache.Backend || cfg.Cache.RedisAddr != original.Cache.RedisAddr || cfg.Limits.Shared != original.Limits.Shared {
+	if cfg.Listen != original.Listen || cfg.Cache.Backend != original.Cache.Backend || cfg.Cache.RedisAddr != original.Cache.RedisAddr || cfg.Limits.Shared != original.Limits.Shared || cfg.Tracing.OTLPEndpoint != original.Tracing.OTLPEndpoint {
 		log.Warn("listen address, cache and shared-limit settings change only on restart")
 	}
 	log.Info("config reloaded", "models", len(cfg.Models), "providers", len(cfg.Providers))

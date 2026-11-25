@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 )
 
 // Config is the full gateway configuration.
@@ -22,6 +23,19 @@ type Config struct {
 	Pricing   map[string]ModelPricing `json:"pricing"`
 	Limits    Limits                  `json:"limits"`
 	KeySource KeySource               `json:"key_source"`
+	Tracing   Tracing                 `json:"tracing"`
+}
+
+// Tracing exports spans to an OpenTelemetry collector over OTLP/HTTP. Empty
+// endpoint (and no OTEL_EXPORTER_OTLP_ENDPOINT) means tracing is off. Read at
+// startup; changing it needs a restart.
+type Tracing struct {
+	// OTLPEndpoint is the collector's base URL, e.g. http://otel-collector:4318.
+	OTLPEndpoint string `json:"otlp_endpoint"`
+	ServiceName  string `json:"service_name"`
+	// SampleRatio is the share of new traces recorded, 0 to 1 (default 1).
+	// A caller's sampling decision in traceparent is always followed.
+	SampleRatio *float64 `json:"sample_ratio"`
 }
 
 // KeySource pulls extra API keys from the console. Empty URL means keys come
@@ -150,6 +164,19 @@ func (c *Config) applyDefaults() {
 	if c.Limits.BreakerCooldownSeconds == 0 {
 		c.Limits.BreakerCooldownSeconds = 30
 	}
+	if c.Tracing.OTLPEndpoint == "" {
+		c.Tracing.OTLPEndpoint = strings.TrimRight(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "/")
+	}
+	if c.Tracing.ServiceName == "" {
+		c.Tracing.ServiceName = os.Getenv("OTEL_SERVICE_NAME")
+	}
+	if c.Tracing.ServiceName == "" {
+		c.Tracing.ServiceName = "llm-gateway"
+	}
+	if c.Tracing.SampleRatio == nil {
+		one := 1.0
+		c.Tracing.SampleRatio = &one
+	}
 	if c.KeySource.URL != "" && c.KeySource.RefreshSeconds == 0 {
 		c.KeySource.RefreshSeconds = 30
 	}
@@ -226,6 +253,15 @@ func (c *Config) Validate() error {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("cache.backend %q is not valid", c.Cache.Backend))
+	}
+
+	if tr := c.Tracing; tr.OTLPEndpoint != "" {
+		if u, err := url.Parse(tr.OTLPEndpoint); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			errs = append(errs, fmt.Errorf("tracing.otlp_endpoint %q must be an http(s) URL", tr.OTLPEndpoint))
+		}
+	}
+	if r := c.Tracing.SampleRatio; r != nil && (*r < 0 || *r > 1) {
+		errs = append(errs, errors.New("tracing.sample_ratio must be between 0 and 1"))
 	}
 
 	if c.Limits.Shared && c.Cache.Backend != "redis" {

@@ -25,6 +25,7 @@ import (
 	"github.com/sillykea/llm-gateway/internal/provider"
 	"github.com/sillykea/llm-gateway/internal/ratelimit"
 	"github.com/sillykea/llm-gateway/internal/router"
+	"github.com/sillykea/llm-gateway/internal/tracing"
 )
 
 // Pinger is implemented by dependencies the readiness probe should check.
@@ -67,6 +68,7 @@ type Server struct {
 	log     *slog.Logger
 	ready   []Pinger
 	remote  KeySource // nil when keys come only from the config file
+	tracer  *tracing.Tracer
 
 	breakersMu sync.Mutex
 	breakers   map[string]*breaker.Breaker
@@ -83,6 +85,8 @@ type Options struct {
 	// Shared, when set, holds rate limits and budgets in Redis instead of
 	// in this process.
 	Shared ratelimit.Evaler
+	// Tracer records spans; nil turns tracing off.
+	Tracer *tracing.Tracer
 }
 
 // New builds a server from options.
@@ -99,6 +103,7 @@ func New(o Options) (*Server, error) {
 		log:      log,
 		ready:    o.Ready,
 		remote:   o.Keys,
+		tracer:   o.Tracer,
 		breakers: map[string]*breaker.Breaker{},
 	}
 	if o.Shared != nil {
@@ -184,7 +189,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	// Outermost first: every request gets an ID, panics are caught and
 	// everything is access-logged with its final status.
-	return withRequestID(s.withAccessLog(s.withRecover(mux)))
+	return withRequestID(s.withTracing(s.withAccessLog(s.withRecover(mux))))
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
