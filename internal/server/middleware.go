@@ -112,6 +112,11 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				break
 			}
 		}
+		if key == nil && s.remote != nil {
+			if k, ok := s.remote.Lookup(token); ok {
+				key = &k
+			}
+		}
 		if key == nil {
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return

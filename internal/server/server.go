@@ -39,6 +39,12 @@ type runtime struct {
 	slots  chan struct{} // semaphore for max in-flight requests
 }
 
+// KeySource finds API keys managed outside the config file, such as keys
+// synced from the console. It is checked after the config file's keys.
+type KeySource interface {
+	Lookup(token string) (config.APIKey, bool)
+}
+
 // Server handles gateway HTTP traffic.
 type Server struct {
 	rt atomic.Pointer[runtime]
@@ -49,6 +55,7 @@ type Server struct {
 	metrics *metrics.Registry
 	log     *slog.Logger
 	ready   []Pinger
+	remote  KeySource // nil when keys come only from the config file
 
 	breakersMu sync.Mutex
 	breakers   map[string]*breaker.Breaker
@@ -61,6 +68,7 @@ type Options struct {
 	Cache     cache.Cache
 	Logger    *slog.Logger
 	Ready     []Pinger
+	Keys      KeySource
 }
 
 // New builds a server from options.
@@ -76,6 +84,7 @@ func New(o Options) (*Server, error) {
 		metrics:  metrics.New(),
 		log:      log,
 		ready:    o.Ready,
+		remote:   o.Keys,
 		breakers: map[string]*breaker.Breaker{},
 	}
 	if err := s.Reload(o.Config, o.Providers); err != nil {
@@ -104,6 +113,16 @@ func (s *Server) ReloadFailed() {
 }
 
 func (s *Server) current() *runtime { return s.rt.Load() }
+
+// ConfigKeyNames returns the names of the keys in the config file. Keys from
+// another source must not reuse them, because limits are tracked by name.
+func (s *Server) ConfigKeyNames() map[string]bool {
+	names := map[string]bool{}
+	for _, k := range s.current().cfg.APIKeys {
+		names[k.Name] = true
+	}
+	return names
+}
 
 // Metrics exposes the registry (used in tests).
 func (s *Server) Metrics() *metrics.Registry { return s.metrics }

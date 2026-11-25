@@ -396,7 +396,7 @@ func TestReloadKeepsStateAndSwapsRoutes(t *testing.T) {
 	if resp.Choices[0].Message.Content != "from local" {
 		t.Error("new routes should apply after reload")
 	}
-	if h.server.Metrics().Value("llm_gateway_requests_total", metrics.Labels{"alias": "chat", "provider": "cloud", "status": "ok"}) != 1 {
+	if h.server.Metrics().Value("llm_gateway_requests_total", metrics.Labels{"alias": "chat", "provider": "cloud", "status": "ok", "key": "test"}) != 1 {
 		t.Error("metrics must survive a reload")
 	}
 
@@ -417,5 +417,53 @@ func TestPanicRecovery(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != 500 || h.server.Metrics().Value("llm_gateway_panics_total", nil) != 1 {
 		t.Fatalf("got %d", rec.Code)
+	}
+}
+
+// fakeKeys is a KeySource backed by a map of token -> key.
+type fakeKeys map[string]config.APIKey
+
+func (f fakeKeys) Lookup(token string) (config.APIKey, bool) {
+	k, ok := f[token]
+	return k, ok
+}
+
+func TestRemoteKeysAreAccepted(t *testing.T) {
+	h := newHarness(t, "off", 0)
+	srv, err := New(Options{
+		Config: h.server.current().cfg, Providers: h.providers, Cache: cache.NewMemory(10),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Keys:   fakeKeys{"lgw_console": {Name: "team-a", RPM: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(token string) int {
+		body := `{"model":"chat","messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := call("lgw_console"); got != http.StatusOK {
+		t.Fatalf("console key: status %d", got)
+	}
+	// The remote key's own limits apply: RPM 1, so the second call is refused.
+	if got := call("lgw_console"); got != http.StatusTooManyRequests {
+		t.Fatalf("console key over its rpm: status %d", got)
+	}
+	if got := call("secret"); got != http.StatusOK {
+		t.Fatalf("config file key should still work: status %d", got)
+	}
+	if got := call("lgw_unknown"); got != http.StatusUnauthorized {
+		t.Fatalf("unknown key: status %d", got)
+	}
+	if v := srv.Metrics().Value("llm_gateway_requests_total", metrics.Labels{"alias": "chat", "provider": "cloud", "status": "ok", "key": "team-a"}); v != 1 {
+		t.Fatalf("requests by key = %v", v)
+	}
+	if names := srv.ConfigKeyNames(); !names["test"] || names["team-a"] {
+		t.Fatalf("ConfigKeyNames = %v", names)
 	}
 }

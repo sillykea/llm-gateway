@@ -250,7 +250,7 @@ func (s *Server) tryTargets(r *http.Request, c *call, do func(context.Context, r
 		if err != nil {
 			status = "error"
 		}
-		s.metrics.Inc("llm_gateway_requests_total", metrics.Labels{"alias": c.req.Model, "provider": name, "status": status})
+		s.metrics.Inc("llm_gateway_requests_total", metrics.Labels{"alias": c.req.Model, "provider": name, "status": status, "key": c.key})
 
 		if err == nil {
 			s.log.Info("chat completed", "alias", c.req.Model, "provider", name, "model", t.Model,
