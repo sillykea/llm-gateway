@@ -35,8 +35,36 @@ jobs:
       - name: Benchmarks compile and run
         run: go test -run '^$' -bench . -benchtime 100x ./...
 
+  # What the gateway adds on top of a 50 ms model, at a steady 500 req/s,
+  # with Redis-backed cache and shared limits.
+  loadtest:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 2s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with: { go-version: "1.26" }
+      - name: Start the gateway
+        run: |
+          go build -o gateway ./cmd/gateway && go build -o loadtest ./cmd/loadtest
+          GATEWAY_API_KEY=load-key ./gateway -config configs/loadtest-redis.json > gateway.log 2>&1 &
+          for i in $(seq 1 20); do curl -sf localhost:8080/healthz && break; sleep 0.5; done
+      - name: Load test
+        run: ./loadtest -key load-key -rate 500 -duration 20s -max-overhead-p99 50ms | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: No shared-state errors
+        run: |
+          curl -s localhost:8080/metrics | grep -E '^llm_gateway_(shared_state_errors|cache|load_shed)' || true
+          ! curl -s localhost:8080/metrics | grep -q '^llm_gateway_shared_state_errors_total'
+      - name: Gateway log on failure
+        if: failure()
+        run: tail -50 gateway.log
+
   image:
-    needs: test
+    needs: [test, loadtest]
     runs-on: ubuntu-latest
     permissions:
       contents: read

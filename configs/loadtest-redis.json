@@ -1,0 +1,46 @@
+{
+  "listen": ":8080",
+  "api_keys": [
+    {
+      "name": "load",
+      "key_env": "GATEWAY_API_KEY",
+      "rpm": 1000000,
+      "monthly_budget_usd": 1000000
+    }
+  ],
+  "providers": [
+    {
+      "name": "mock",
+      "type": "openai",
+      "base_url": "http://127.0.0.1:9099",
+      "local": true,
+      "timeout_seconds": 10
+    }
+  ],
+  "models": {
+    "chat": [
+      {
+        "provider": "mock",
+        "model": "mock"
+      }
+    ]
+  },
+  "pii": {
+    "mode": "route_local"
+  },
+  "cache": {
+    "backend": "redis",
+    "redis_addr": "127.0.0.1:6379",
+    "ttl_seconds": 3600
+  },
+  "limits": {
+    "max_in_flight": 4096,
+    "shared": true
+  },
+  "pricing": {
+    "mock": {
+      "input_per_1k": 0.0001,
+      "output_per_1k": 0.0002
+    }
+  }
+}

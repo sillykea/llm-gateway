@@ -153,7 +153,11 @@ func (c *Config) applyDefaults() {
 		c.Cache.MaxEntries = 1000
 	}
 	if c.Cache.RedisPool == 0 {
-		c.Cache.RedisPool = 10
+		// Idle connections kept open. With shared limits a request makes
+		// about five Redis calls; a small pool means dialling and closing
+		// connections under load (measured at 2,000 req/s for 20s: 6,035
+		// new connections with 10, 135 with 64).
+		c.Cache.RedisPool = 64
 	}
 	if c.Limits.MaxInFlight == 0 {
 		c.Limits.MaxInFlight = 256

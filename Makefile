@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: run test cover bench lint vuln build up down reload
+.PHONY: run test cover bench lint vuln build up down reload loadtest
 
 run:
 	GATEWAY_API_KEY=dev-key go run ./cmd/gateway -config configs/gateway.json
@@ -32,3 +32,6 @@ down:
 
 reload:
 	docker compose kill -s HUP gateway
+
+loadtest: ## gateway overhead at 1,000 req/s; start it first: GATEWAY_API_KEY=load-key go run ./cmd/gateway -config configs/loadtest.json
+	go run ./cmd/loadtest -key load-key -rate 1000 -duration 20s

@@ -48,7 +48,7 @@ type redisConn struct {
 // NewRedis creates a client. Connections are opened lazily, on first use.
 func NewRedis(addr string, opts RedisOptions) *Redis {
 	if opts.PoolSize <= 0 {
-		opts.PoolSize = 10
+		opts.PoolSize = 64
 	}
 	return &Redis{
 		addr:     addr,

@@ -55,6 +55,37 @@ flowchart LR
 
 Every response carries `X-Gateway-Provider`, `X-Gateway-Model`, `X-Gateway-PII`, `X-Cache` and `X-Request-ID` headers.
 
+## Performance
+
+`cmd/loadtest` starts a mock model server that always answers in 50 ms, measures it directly, then sends the same traffic through the gateway; the difference is what the gateway adds (auth, rate limit, budget, the personal-data scan, routing, cache, proxying). Load is open-loop: requests go out on a fixed schedule and latency counts from when each was due, so a slow gateway can't hide its queueing by slowing the client down.
+
+On one 2-vCPU machine running the gateway, Redis, the mock model and the load generator together, 20 s per run:
+
+| Setup | Rate | Errors | Gateway overhead p50 | p90 | p99 |
+|---|---|---|---|---|---|
+| In-memory cache and limits | 1,000 req/s | 0 | 0.4 ms | 0.5 ms | 1.4 ms |
+| In-memory cache and limits | 2,000 req/s | 0 | 0.6 ms | 2.4 ms | 6.7 ms |
+| Redis cache, shared limits | 1,000 req/s | 0 | 1.2 ms | 2.2 ms | 7.2 ms |
+| Redis cache, shared limits | 2,000 req/s | 0 | 1.8 ms | 9.1 ms | 33.9 ms |
+
+Shared limits cost about a millisecond at the median: each request makes around five Redis calls (rate limit, budget check, cache get and set, spend). With 80% of prompts repeated, cache hits bring the median response to 1.0 ms instead of 50 ms.
+
+The first run of this test found a problem: with Redis at 2,000 req/s, median overhead was around 500 ms and Redis calls timed out. A CPU profile showed 7% of the gateway's time going to rebuilding a string escaper on every metric update. Building it once fixed the collapse. The same test showed the Redis pool (10 idle connections) opening 6,035 new connections in 20 s; the default is now 64, which opened 135.
+
+```bash
+make loadtest   # needs the gateway running with configs/loadtest.json
+```
+
+Micro-benchmarks of the hot paths (`make bench`):
+
+| Operation | Time |
+|---|---|
+| Personal data scan, 4 KB prompt | ~11 µs |
+| Rate limit check (parallel) | ~140 ns |
+| Memory cache get/set (parallel) | ~440 ns |
+
+The personal data scan was originally about 500 µs, because Go's regexp engine runs at around 8 MB/s on these patterns. Cutting the text into small candidate windows first (the text around each `@`, and runs of digits) and only running the patterns on those made it about 40x faster, with the same results.
+
 ## Quick start
 
 ```bash
@@ -107,18 +138,6 @@ kubectl apply -f secret.yaml -f deploy/k8s/
 ```
 
 You get two or more replicas spread across nodes, an HPA, a PodDisruptionBudget, and a NetworkPolicy that limits who can call the gateway and where it can connect. Pods run as non-root with a read-only filesystem. A `preStop` delay and graceful shutdown mean a rolling deploy drops no requests.
-
-## Performance
-
-The gateway's own overhead is small next to model latency, but it sits in front of every call, so the hot paths are benchmarked (`make bench`):
-
-| Operation | Time |
-|---|---|
-| Personal data scan, 4 KB prompt | ~11 µs |
-| Rate limit check (parallel) | ~140 ns |
-| Memory cache get/set (parallel) | ~440 ns |
-
-The personal data scan was originally about 500 µs, because Go's regexp engine runs at around 8 MB/s on these patterns. Cutting the text into small candidate windows first (the text around each `@`, and runs of digits) and only running the patterns on those made it about 40x faster, with the same results.
 
 ## Development
 
