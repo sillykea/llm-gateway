@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 )
 
@@ -20,6 +21,16 @@ type Config struct {
 	Cache     Cache                   `json:"cache"`
 	Pricing   map[string]ModelPricing `json:"pricing"`
 	Limits    Limits                  `json:"limits"`
+	KeySource KeySource               `json:"key_source"`
+}
+
+// KeySource pulls extra API keys from the console. Empty URL means keys come
+// only from the config file. Read at startup; changing it needs a restart.
+type KeySource struct {
+	URL            string `json:"url"`
+	TokenEnv       string `json:"token_env"`
+	RefreshSeconds int    `json:"refresh_seconds"`
+	Token          string `json:"-"`
 }
 
 // Limits protect the gateway and its upstreams under load.
@@ -135,6 +146,9 @@ func (c *Config) applyDefaults() {
 	if c.Limits.BreakerCooldownSeconds == 0 {
 		c.Limits.BreakerCooldownSeconds = 30
 	}
+	if c.KeySource.URL != "" && c.KeySource.RefreshSeconds == 0 {
+		c.KeySource.RefreshSeconds = 30
+	}
 	for i := range c.Providers {
 		if c.Providers[i].TimeoutSeconds == 0 {
 			c.Providers[i].TimeoutSeconds = 60
@@ -148,6 +162,9 @@ func (c *Config) resolveSecrets() {
 	}
 	if c.Cache.RedisPasswordEnv != "" {
 		c.Cache.RedisPassword = os.Getenv(c.Cache.RedisPasswordEnv)
+	}
+	if c.KeySource.TokenEnv != "" {
+		c.KeySource.Token = os.Getenv(c.KeySource.TokenEnv)
 	}
 	for i := range c.Providers {
 		if c.Providers[i].APIKeyEnv != "" {
@@ -205,6 +222,18 @@ func (c *Config) Validate() error {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("cache.backend %q is not valid", c.Cache.Backend))
+	}
+
+	if ks := c.KeySource; ks.URL != "" {
+		if u, err := url.Parse(ks.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			errs = append(errs, fmt.Errorf("key_source.url %q must be an http(s) URL", ks.URL))
+		}
+		if ks.Token == "" {
+			errs = append(errs, fmt.Errorf("key_source: environment variable %q is empty", ks.TokenEnv))
+		}
+		if ks.RefreshSeconds < 5 {
+			errs = append(errs, errors.New("key_source.refresh_seconds must be at least 5"))
+		}
 	}
 
 	for _, k := range c.APIKeys {

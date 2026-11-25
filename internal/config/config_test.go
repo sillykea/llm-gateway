@@ -73,3 +73,29 @@ func TestRedisPasswordFromEnv(t *testing.T) {
 		t.Error("an empty password variable should fail validation")
 	}
 }
+
+func TestKeySource(t *testing.T) {
+	base := `"providers": [{"name": "local", "type": "ollama", "base_url": "http://x"}],
+		"models": {"chat": [{"provider": "local", "model": "m"}]}`
+
+	t.Setenv("SYNC_TOKEN", "tok")
+	cfg, err := Load(write(t, `{`+base+`,
+		"key_source": {"url": "http://console:8080/internal/keys", "token_env": "SYNC_TOKEN"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KeySource.Token != "tok" || cfg.KeySource.RefreshSeconds != 30 {
+		t.Errorf("got %+v", cfg.KeySource)
+	}
+
+	for name, ks := range map[string]string{
+		"bad scheme":   `{"url": "ftp://console/keys", "token_env": "SYNC_TOKEN"}`,
+		"no host":      `{"url": "http:///keys", "token_env": "SYNC_TOKEN"}`,
+		"empty token":  `{"url": "http://console/keys", "token_env": "UNSET_TOKEN"}`,
+		"too frequent": `{"url": "http://console/keys", "token_env": "SYNC_TOKEN", "refresh_seconds": 1}`,
+	} {
+		if _, err := Load(write(t, `{`+base+`, "key_source": `+ks+`}`)); err == nil {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
